@@ -30,7 +30,7 @@ import timm.optim.optim_factory as optim_factory
 import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
-import models_mae
+import models_map
 
 from engine_pretrain import train_one_epoch
 
@@ -153,7 +153,7 @@ def main(args):
     )
     
     # define the model
-    model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss)
+    model = models_map.__dict__[args.model](norm_pix_loss=args.norm_pix_loss)
 
     model.to(device)
 
