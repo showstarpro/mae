@@ -17,6 +17,7 @@ import torch.nn as nn
 from timm.models.vision_transformer import PatchEmbed, Block
 
 from util.pos_embed import get_2d_sincos_pos_embed
+import torch.nn.functional as F
 
 
 class MaskedAutoencoderViT(nn.Module):
@@ -40,6 +41,12 @@ class MaskedAutoencoderViT(nn.Module):
             Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer)
             for i in range(depth)])
         self.norm = norm_layer(embed_dim)
+
+        # alignment_blocks
+        self.alignment_blocks = nn.ModuleList([
+            Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer)
+            for i in range(depth)])
+        self.alignment_norm = norm_layer(embed_dim)
         # --------------------------------------------------------------------------
 
         # --------------------------------------------------------------------------
@@ -50,10 +57,16 @@ class MaskedAutoencoderViT(nn.Module):
 
         self.decoder_pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, decoder_embed_dim), requires_grad=False)  # fixed sin-cos embedding
 
+
+        self.regresser_blocks = nn.ModuleList([
+            Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer)
+            for i in range(decoder_depth // 2)])
+
         self.decoder_blocks = nn.ModuleList([
             Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer)
-            for i in range(decoder_depth)])
+            for i in range(decoder_depth // 2)])
 
+        self.regresser_nrom = norm_layer(decoder_embed_dim)
         self.decoder_norm = norm_layer(decoder_embed_dim)
         self.decoder_pred = nn.Linear(decoder_embed_dim, patch_size**2 * in_chans, bias=True) # decoder to patch
         # --------------------------------------------------------------------------
@@ -61,6 +74,27 @@ class MaskedAutoencoderViT(nn.Module):
         self.norm_pix_loss = norm_pix_loss
 
         self.initialize_weights()
+        self._init_alignment_encoder()
+
+    def _init_alignment_encoder(self):
+        # init the weights of alignment_encoder with those of backbone
+        for param_encoder, param_alignment_encoder in zip(self.blocks.parameters(), self.alignment_blocks.parameters()):
+            param_alignment_encoder.detach()
+            param_alignment_encoder.data.copy_(param_encoder.data)
+            param_alignment_encoder.requires_grad = False
+        
+        self.alignment_norm.weight = self.norm.weight
+        self.alignment_norm.bias = self.norm.bias
+
+
+    def alignment_parameter_update(self):
+        """parameter update of the alignment_encoder network."""
+        for param_encoder, param_alignment_encoder in zip(self.blocks.parameters(),
+                                                self.alignment_blocks.parameters()):
+            param_alignment_encoder.data = param_encoder.data # completely copy
+        
+        self.alignment_norm.weight = self.norm.weight
+        self.alignment_norm.bias = self.norm.bias
 
     def initialize_weights(self):
         # initialization
@@ -173,6 +207,7 @@ class MaskedAutoencoderViT(nn.Module):
         # embed tokens
         x = self.decoder_embed(x)
 
+
         # append mask tokens to sequence
         mask_tokens = self.mask_token.repeat(x.shape[0], ids_restore.shape[1] + 1 - x.shape[1], 1)
         x  = torch.cat([x, mask_tokens], dim=1)
@@ -182,6 +217,11 @@ class MaskedAutoencoderViT(nn.Module):
 
         # add pos embed
         x = x + self.decoder_pos_embed
+
+        for blk in self.regresser_blocks:
+            x = blk(x)
+
+        regresser_features = x
 
         # apply Transformer blocks
         for blk in self.decoder_blocks:
@@ -194,7 +234,7 @@ class MaskedAutoencoderViT(nn.Module):
         # remove cls token
         x = x[:, 1:, :]
 
-        return x
+        return x, regresser_features[:, 1:, :]
 
     def forward_loss(self, imgs, pred, mask):
         """
@@ -214,11 +254,38 @@ class MaskedAutoencoderViT(nn.Module):
         loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
         return loss
 
+    def forward_align_loss(self, features, imgs, mask):
+        x = self.patch_embed(imgs)
+        x = x + self.pos_embed[:, 1:, :]
+
+        B, L, D = x.shape
+
+        unmask = mask.bool()
+        x_unmask = x[unmask].reshape(B, -1, D).detach()
+
+        with torch.no_grad():
+            # apply Transformer blocks
+            for blk in self.alignment_blocks:
+                x_unmask = blk(x_unmask)
+            x_unmask = self.alignment_norm(x_unmask)
+            x_unmask = self.decoder_embed(x_unmask)
+
+            self.alignment_parameter_update()
+
+        B, L, D = features.shape
+        features_unmask = features[unmask].reshape(B, -1, D)
+
+        features_loss = F.mse_loss(features_unmask.float(), x_unmask.detach().float(), reduction="mean")
+        return features_loss
+
     def forward(self, imgs, mask_ratio=0.75):
         latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
-        pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
+        pred, regresser_features = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
         loss = self.forward_loss(imgs, pred, mask)
-        return loss, pred, mask
+        features_loss = self.forward_align_loss(regresser_features, imgs, mask)
+        beta = 1
+        total_loss = loss + beta * features_loss
+        return total_loss, pred, mask
 
 
 def mae_vit_base_patch16_dec512d8b(**kwargs):
