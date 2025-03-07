@@ -151,11 +151,20 @@ class MaskedAutoencoderViT(nn.Module):
         # embed patches
         x = self.patch_embed(x)
 
-        # add pos embed w/o cls token
-        x = x + self.pos_embed[:, 1:, :]
+        # # add pos embed w/o cls token
+        # x = x + self.pos_embed[:, 1:, :]
 
         # masking: length -> length * mask_ratio
         x, mask, ids_restore = self.random_masking(x, mask_ratio)
+        # 1. with order
+        length = x.shape[1] 
+        x = x + self.pos_embed[:, 1: (length+1), :]
+
+        # 2. visible pixel with wrong pos_embed 
+        # B = x.shape[0]
+        # pos_embed = self.pos_embed[:, 1:, :].repeat(B, 1, 1)
+        # pos_embed, _, _ = self.random_masking(pos_embed, mask_ratio)
+        # x = x + pos_embed
 
         # append cls token
         cls_token = self.cls_token + self.pos_embed[:, :1, :]
