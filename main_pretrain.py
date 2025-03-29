@@ -29,55 +29,101 @@ import timm.optim.optim_factory as optim_factory
 
 import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
+from util.pos_embed import interpolate_pos_embed
+from util.cosine_scheduler import cosine_scheduler
 
 import models_mae
+import models_teacher
 
-from engine_pretrain import train_one_epoch
+
+from engine_pretrain import train_one_epoch_ema
 
 
 def get_args_parser():
     parser = argparse.ArgumentParser('MAE pre-training', add_help=False)
-    parser.add_argument('--batch_size', default=64, type=int,
-                        help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
-    parser.add_argument('--epochs', default=400, type=int)
+    parser.add_argument('--batch_size', default=96, type=int,
+                        help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus, Smaller batch size(e.g. 96 batch x 8 gpu) can produce better performance')
+    parser.add_argument('--epochs', default=300, type=int)
     parser.add_argument('--accum_iter', default=1, type=int,
                         help='Accumulate gradient iterations (for increasing the effective batch size under memory constraints)')
 
     # Model parameters
-    parser.add_argument('--model', default='mae_vit_large_patch16', type=str, metavar='MODEL',
+    parser.add_argument('--model', default='mae_vit_base_patch16', type=str, metavar='MODEL',
                         help='Name of model to train')
 
     parser.add_argument('--input_size', default=224, type=int,
                         help='images input size')
+    
+    #parser.add_argument('--tea_input_size', default=112, type=int,
+    #                    help='images input size')
 
     parser.add_argument('--mask_ratio', default=0.75, type=float,
                         help='Masking ratio (percentage of removed patches).')
 
     parser.add_argument('--norm_pix_loss', action='store_true',
                         help='Use (per-patch) normalized pixels as targets for computing loss')
-    parser.set_defaults(norm_pix_loss=False)
+    parser.set_defaults(norm_pix_loss=True)
 
     # Optimizer parameters
-    parser.add_argument('--weight_decay', type=float, default=0.05,
-                        help='weight decay (default: 0.05)')
+    parser.add_argument('--weight_decay', type=float, default=0.04, help="""Initial value of the
+        weight decay. With ViT, a smaller value at the beginning of training works well.""")
+    parser.add_argument('--weight_decay_end', type=float, default=0.4, help="""Final value of the
+        weight decay. We use a cosine schedule for WD and using a larger decay by
+        the end of training improves performance for ViTs.""")
 
     parser.add_argument('--lr', type=float, default=None, metavar='LR',
                         help='learning rate (absolute lr)')
-    parser.add_argument('--blr', type=float, default=1e-3, metavar='LR',
+    parser.add_argument('--blr', type=float, default=2.666e-4, metavar='LR',
                         help='base learning rate: absolute_lr = base_lr * total_batch_size / 256')
     parser.add_argument('--min_lr', type=float, default=0., metavar='LR',
                         help='lower lr bound for cyclic schedulers that hit 0')
 
-    parser.add_argument('--warmup_epochs', type=int, default=40, metavar='N',
-                        help='epochs to warmup LR')
+    parser.add_argument('--warmup_epochs', type=int, default=60, metavar='N',
+                        help='epochs to warmup LR, We set warmup epochs as 0.2 * epochs')
+
+    # Models to produce features for decoder
+    parser.add_argument('--model_teacher_path', default=None, help='the path of teachers checkpoint')
+    parser.add_argument('--model_key', default='model|module', type=str)
+    parser.add_argument('--model_prefix', default='', type=str)
+    parser.add_argument('--model_teacher', default='vit_base_patch16', type=str, metavar='MODEL',
+                        help='Name of model to train')
+    parser.add_argument('--nb_classes', default=1000, type=int,
+                        help='number of the classification types')
+    parser.add_argument('--drop', type=float, default=0.0, metavar='PCT',
+                        help='Dropout rate (default: 0.)')
+    parser.add_argument('--drop_path', type=float, default=0.25, metavar='PCT',
+                        help='Drop path rate (default: 0.25)')
+    parser.add_argument('--attn_drop_rate', type=float, default=0.0, metavar='PCT',
+                        help='Attention dropout rate (default: 0.)')
+    parser.add_argument('--use_mean_pooling', action='store_true')
+    parser.set_defaults(use_mean_pooling=True)
+    parser.add_argument('--init_scale', default=0.001, type=float)
+    parser.add_argument('--global_pool', action='store_true')
+    parser.set_defaults(global_pool=False)
+    parser.add_argument('--momentum_teacher', default=0.96, type=float, help="""Base EMA
+        parameter for teacher update. The value is increased to [momentum_teacher_final] during training with cosine schedule.
+        We recommend setting a higher value with small batches: for example use 0.96 to 0.99 with batch size of 256.""")
+    parser.add_argument('--momentum_teacher_final', default=0.99, type=float, help="""The end value of base EMA
+        parameter for teacher update. We recommend setting a higher value with small batches: for example use 0.96 with batch size of 256.""")
+    parser.add_argument('--momentum_teacher_warmup', default=0.0, type=float, help="""Only worked when momentum_teacher_warmup_ep > 0, The EMA
+        parameter for teacher update. The value is increased from [momentum_teacher_warmup] to [momentum_teacher] in the first [momentum_teacher_warmup_ep] epochs""")
+    parser.add_argument('--momentum_teacher_warmup_ep', default=0, type=int, help="""Number of momentum warmup epochs""")
+
+    parser.add_argument('--ema_op', default='per_epoch', type=str)
+    parser.add_argument('--ema_frequent', default=1, type=int, help='how frequent the ema do')
+
+    parser.add_argument('--shrink_num', default=None, type=int, help="""number of tokens feed into the model teacher. 
+        Shrink_num indicate how many tokens are sent to the teachers. Pay attention, there should be 0 < shrink_num <= num_of_tokens * mask_ratio
+        When shrink_num is None, all the tokens(196 if set patch size 16 for 224x224 images) will be sent to the teacher branch""")
+    parser.add_argument('--ncrop_loss', default=None, type=int, help="""number of multi fold strategy in the model teacher
+        When ncrop_loss is None, the multi-fold strategy will not be operated. All masked tokens are fed without bundle.""")
 
     # Dataset parameters
-    parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', type=str,
-                        help='dataset path')
+    parser.add_argument('--data_path', default='/cache/imagenet/', type=str, help='The path of imagenet. Make sure there exists [data_path]/train and [data_path]/val') 
 
-    parser.add_argument('--output_dir', default='./output_dir',
+    parser.add_argument('--output_dir', default='/cache/output/',
                         help='path where to save, empty for no saving')
-    parser.add_argument('--log_dir', default='./output_dir',
+    parser.add_argument('--log_dir', default='/cache/output/',                      
                         help='path where to tensorboard log')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
@@ -119,6 +165,7 @@ def main(args):
 
     cudnn.benchmark = True
 
+    print("Load dataset")
     # simple augmentation
     transform_train = transforms.Compose([
             transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=3),  # 3 is bicubic
@@ -152,15 +199,56 @@ def main(args):
         drop_last=True,
     )
     
+    #momentum_schedule = cosine_scheduler(args.momentum_teacher, 1,
+    #                                           args.epochs, len(data_loader_train))
+    #momentum_schedule = cosine_scheduler(args.momentum_teacher, args.momentum_teacher_final,
+    #                                           args.epochs, 1)
+    momentum_schedule = cosine_scheduler(base_value=args.momentum_teacher, 
+                                        final_value=args.momentum_teacher_final, 
+                                        epochs=args.epochs, 
+                                        niter_per_ep=1, 
+                                        warmup_epochs=args.momentum_teacher_warmup_ep, 
+                                        start_warmup_value=args.momentum_teacher_warmup)
+    
+    print("momentum_schedule " + str(momentum_schedule))
+
     # define the model
-    model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss)
+    model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss, drop_path=args.drop_path)
+    model_teacher = models_teacher.__dict__[args.model_teacher](
+        num_classes=args.nb_classes,
+        drop_path_rate=0.0,
+        mask_ratio=args.mask_ratio,
+        shrink_num=args.shrink_num,
+    )
 
     model.to(device)
 
+    if args.model_teacher_path:
+        checkpoint = torch.load(args.model_teacher_path, map_location='cpu')
+
+        print("Load pre-trained checkpoint from: %s" % args.model_teacher_path)
+        checkpoint_model = checkpoint['model']
+        state_dict = model_teacher.state_dict()
+        for k in ['head.weight', 'head.bias']:
+            if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
+                print(f"Removing key {k} from pretrained checkpoint")
+                del checkpoint_model[k]
+
+        # interpolate position embedding
+        interpolate_pos_embed(model_teacher, checkpoint_model)
+
+        # load pre-trained model
+        msg = model_teacher.load_state_dict(checkpoint_model, strict=False)
+        print('msg:', msg)
+
+    model_teacher.to(device)
+
     model_without_ddp = model
+    model_teacher_without_ddp = model
     print("Model = %s" % str(model_without_ddp))
 
     eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
+    print('get_world_size:', misc.get_world_size())
     
     if args.lr is None:  # only base_lr is specified
         args.lr = args.blr * eff_batch_size / 256
@@ -173,7 +261,9 @@ def main(args):
 
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+        model_teacher = torch.nn.parallel.DistributedDataParallel(model_teacher, device_ids=[args.gpu], find_unused_parameters=True)
         model_without_ddp = model.module
+        model_teacher_without_ddp = model_teacher.module
     
     # following timm: set wd as 0 for bias and norm layers
     param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
@@ -181,22 +271,31 @@ def main(args):
     print(optimizer)
     loss_scaler = NativeScaler()
 
-    misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
+    misc.load_model(args=args, model_without_ddp=model_without_ddp, 
+                                optimizer=optimizer, 
+                                loss_scaler=loss_scaler,
+                                model_teacher_without_ddp=model_teacher_without_ddp)
 
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
-        train_stats = train_one_epoch(
-            model, data_loader_train,
+
+        if 'per_ite' in args.ema_op: args.ema_frequent = 1
+        train_stats = train_one_epoch_ema(
+            model, model_teacher, model_teacher_without_ddp, data_loader_train,
             optimizer, device, epoch, loss_scaler,
-            log_writer=log_writer,
+            log_writer=log_writer, momentum_schedule=momentum_schedule, 
+            ema_op=args.ema_op, is_ema=True if (epoch+1) % args.ema_frequent == 0 else False, 
+            shrink_num=args.shrink_num, ncrop_loss=args.ncrop_loss,
             args=args
         )
         if args.output_dir and (epoch % 20 == 0 or epoch + 1 == args.epochs):
+            #Save the checkpoint every 20 epochs
             misc.save_model(
-                args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+                args=args, model=model, model_without_ddp=model_without_ddp, model_teacher=model_teacher,
+                model_teacher_without_ddp=model_teacher_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
