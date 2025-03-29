@@ -292,6 +292,7 @@ def main(args):
             args=args
         )
         if args.output_dir and (epoch % 20 == 0 or epoch + 1 == args.epochs):
+            #print("Writing...")
             #Save the checkpoint every 20 epochs
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, model_teacher=model_teacher,
@@ -304,6 +305,7 @@ def main(args):
         if args.output_dir and misc.is_main_process():
             if log_writer is not None:
                 log_writer.flush()
+            #print("Writing")
             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
 

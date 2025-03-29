@@ -22,12 +22,14 @@ from util.pos_embed import interpolate_pos_embed
 
 from collections import OrderedDict
 
+import torch.distributed as dist
+
 def patchify(model, imgs):
-    """
-    imgs: (N, 3, H, W)
-    x: (N, L, patch_size**2 *3)
-    """
-    p = model.module.patch_embed.patch_size[0]
+    """兼容分布式模式的版本"""
+    # 使用安全访问方式获取底层模型
+    base_model = getattr(model, "module", model)
+    p = base_model.patch_embed.patch_size[0]
+    
     assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % p == 0
 
     h = w = imgs.shape[2] // p
@@ -38,33 +40,42 @@ def patchify(model, imgs):
 
 def weight_delivery(model, epoch, momentum_schedule):
     with torch.no_grad():
-        m = momentum_schedule[epoch]  # momentum parameter
-        student = model
-        all_keys = list(student.module.state_dict().keys())
+        student = getattr(model, "module", model)  # 安全访问底层模型
+        student_dict = student.state_dict()
+        
         new_dict = OrderedDict()
-        for key in all_keys:
+        for key in student_dict.keys():
+            # 保留所有参数，包括decoder部分
+            new_dict[key] = student_dict[key]
+            
+            # 如果需要进行参数名转换（可选）
+            # 例如移除"backbone."前缀
             if key.startswith('backbone.'):
-                new_dict[key[9:]] = student.module.state_dict()[key]
-            elif key.startswith('encoder.') and not 'norm.' in key:
-                new_dict[key[8:]] = student.module.state_dict()[key]
-            else:
-                if key.startswith('decoder') or key.startswith('encoder_to_decoder.') or key.startswith('mask_token') or key.startswith('encoder.norm'):
-                    pass
-                else:
-                    new_dict[key] = student.module.state_dict()[key]
-    return new_dict
-
+                new_key = key[9:]
+                new_dict[new_key] = student_dict[key]
+                del new_dict[key]  # 删除旧键
+                
+        return new_dict
 
 def EMA_process(model, model_teacher, model_teacher_without_ddp, epoch, momentum_schedule):
-    # EMA update for the teacher
+    # EMA更新应作用于未包装的模型
     student_crop = copy.deepcopy(model_teacher_without_ddp)
     m = momentum_schedule[epoch]
+    
     with torch.no_grad():
         new_dict = weight_delivery(model, epoch, momentum_schedule)
-        #interpolate_pos_embed(student_crop, new_dict)
         student_crop.load_state_dict(new_dict)
-        for param_q, param_k in zip(student_crop.parameters(), model_teacher_without_ddp.parameters()):
+        
+        # 使用更安全的参数更新方式
+        for param_q, param_k in zip(student_crop.parameters(), 
+                                   model_teacher_without_ddp.parameters()):
             param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
+        
+        # 如果是分布式训练，需要同步各进程的EMA参数
+        if dist.is_initialized():
+            for param in model_teacher_without_ddp.parameters():
+                dist.all_reduce(param.data, op=dist.ReduceOp.SUM)
+                param.data /= dist.get_world_size()
 
 def train_one_epoch_ema(model: torch.nn.Module, model_teacher: torch.nn.Module, model_teacher_without_ddp: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
