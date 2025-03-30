@@ -24,6 +24,7 @@ from collections import OrderedDict
 
 import torch.distributed as dist
 
+'''
 def patchify(model, imgs):
     """兼容分布式模式的版本"""
     # 使用安全访问方式获取底层模型
@@ -37,6 +38,7 @@ def patchify(model, imgs):
     x = torch.einsum('nchpwq->nhwpqc', x)
     x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
     return x
+'''
 
 def weight_delivery(model, epoch, momentum_schedule):
     with torch.no_grad():
@@ -45,6 +47,7 @@ def weight_delivery(model, epoch, momentum_schedule):
         
         new_dict = OrderedDict()
         for key in student_dict.keys():
+            
             # 保留所有参数，包括decoder部分
             new_dict[key] = student_dict[key]
             
@@ -54,6 +57,31 @@ def weight_delivery(model, epoch, momentum_schedule):
                 new_key = key[9:]
                 new_dict[new_key] = student_dict[key]
                 del new_dict[key]  # 删除旧键
+            elif key.startswith('encoder.') and not 'norm.' in key:
+                new_key = key[8:]
+                new_dict[new_key] = student_dict[key]
+                del new_dict[key]  # 删除旧键
+            elif key.startswith('decoder') or key.startswith('encoder_to_decoder.') or key.startswith('mask_token'):
+                del new_dict[key]
+            '''
+            else:
+                if key.startswith('decoder') or key.startswith('encoder_to_decoder.') or key.startswith('mask_token') or key.startswith('encoder.norm'):
+                    pass
+                else:
+                    new_dict[key] = student_dict[key]
+                    del new_dict[key]  # 删除旧键
+            '''
+            '''
+            if key.startswith('backbone.'):
+                new_dict[key[9:]] = student.module.state_dict()[key]
+            elif key.startswith('encoder.') and not 'norm.' in key:
+                new_dict[key[8:]] = student.module.state_dict()[key]
+            else:
+                if key.startswith('decoder') or key.startswith('encoder_to_decoder.') or key.startswith('mask_token') or key.startswith('encoder.norm'):
+                    pass
+                else:
+                    new_dict[key] = student.module.state_dict()[key]
+            '''
                 
         return new_dict
 
