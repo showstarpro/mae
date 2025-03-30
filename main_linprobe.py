@@ -38,6 +38,8 @@ import models_vit
 
 from engine_finetune import train_one_epoch, evaluate
 
+# import moxing as mox
+
 
 def get_args_parser():
     parser = argparse.ArgumentParser('MAE linear probing for image classification', add_help=False)
@@ -46,7 +48,10 @@ def get_args_parser():
     parser.add_argument('--epochs', default=90, type=int)
     parser.add_argument('--accum_iter', default=1, type=int,
                         help='Accumulate gradient iterations (for increasing the effective batch size under memory constraints)')
-
+    parser.add_argument('--s3_path', default=' ', type=str, metavar='MODEL',
+                        help='Name of model to train')
+    parser.add_argument('--model_mode', default='model', type=str,
+                        help='dataset path')
     # Model parameters
     parser.add_argument('--model', default='vit_large_patch16', type=str, metavar='MODEL',
                         help='Name of model to train')
@@ -75,14 +80,14 @@ def get_args_parser():
                         help='Use class token instead of global pool for classification')
 
     # Dataset parameters
-    parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', type=str,
+    parser.add_argument('--data_path', default='/cache/imagenet/', type=str,
                         help='dataset path')
     parser.add_argument('--nb_classes', default=1000, type=int,
                         help='number of the classification types')
 
-    parser.add_argument('--output_dir', default='./output_dir',
+    parser.add_argument('--output_dir', default='/cache/output/',
                         help='path where to save, empty for no saving')
-    parser.add_argument('--log_dir', default='./output_dir',
+    parser.add_argument('--log_dir', default='/cache/output/',
                         help='path where to tensorboard log')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
@@ -195,7 +200,8 @@ def main(args):
         checkpoint = torch.load(args.finetune, map_location='cpu')
 
         print("Load pre-trained checkpoint from: %s" % args.finetune)
-        checkpoint_model = checkpoint['model']
+        #checkpoint_model = checkpoint['model']
+        checkpoint_model = checkpoint[args.model_mode]
         state_dict = model.state_dict()
         for k in ['head.weight', 'head.bias']:
             if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
@@ -207,7 +213,7 @@ def main(args):
 
         # load pre-trained model
         msg = model.load_state_dict(checkpoint_model, strict=False)
-        print(msg)
+        print('msg:', msg)
 
         if args.global_pool:
             assert set(msg.missing_keys) == {'head.weight', 'head.bias', 'fc_norm.weight', 'fc_norm.bias'}
@@ -277,11 +283,16 @@ def main(args):
             log_writer=log_writer,
             args=args
         )
-        if args.output_dir:
-            misc.save_model(
+        #if args.output_dir:
+        #    misc.save_model(
+        #        args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+        #        loss_scaler=loss_scaler, epoch=epoch)
+        if args.output_dir and (epoch % 20 == 0 or epoch + 1 == args.epochs):
+            misc.save_ft_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)
-
+            # mox.file.copy_parallel(args.output_dir, args.s3_path)
+        
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         max_accuracy = max(max_accuracy, test_stats["acc1"])
