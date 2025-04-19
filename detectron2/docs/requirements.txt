@@ -1,0 +1,21 @@
+docutils
+# https://github.com/sphinx-doc/sphinx/commit/7acd3ada3f38076af7b2b5c9f3b60bb9c2587a3d
+sphinx
+recommonmark
+sphinx_rtd_theme
+# Dependencies here are only those required by import
+termcolor
+numpy
+tqdm
+matplotlib
+termcolor
+yacs
+tabulate
+cloudpickle
+Pillow
+future
+git+https://github.com/facebookresearch/fvcore.git
+omegaconf>=2.1.0.dev24
+hydra-core>=1.1.0.dev5
+scipy
+timm
