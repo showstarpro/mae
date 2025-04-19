@@ -6,7 +6,7 @@ crop_size = (512, 512)
 data_preprocessor = dict(size=crop_size)
 model = dict(
     data_preprocessor=data_preprocessor,
-    pretrained='/lpai/output/models/lyy/pami_sdae_200ep/pami_sdae_pre200ep_mmcls.pth',
+    pretrained='./mmcls.pth',
     backbone=dict(
         type='MAE',
         img_size=(512, 512),
