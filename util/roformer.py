@@ -7,9 +7,8 @@ import torch
 
 from torch import nn
 
-from timm.layers import Mlp, DropPath
-
-from timm.models.vision_transformer import Attention
+#from timm.layers import Mlp, DropPath
+from timm.models.vision_transformer import Mlp, DropPath
 
 
 # --------------------------------------------------------
