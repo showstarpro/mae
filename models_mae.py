@@ -188,12 +188,13 @@ class MaskedAutoencoderViT(nn.Module):
         # add pos embed
         # x = x + self.decoder_pos_embed
 
+        # TODO
         y = self.learnable_token.expand(x.shape[0], -1, -1)
         # apply Transformer blocks
         for blk in self.decoder_blocks:
             # y = blk(x, y)
             x = blk(x, y)
-        x = self.decoder_norm(y)
+        x = self.decoder_norm(x)
 
         # predictor projection
         x = self.decoder_pred(x)

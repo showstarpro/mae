@@ -221,15 +221,11 @@ class RopeBlock(nn.Module):
     ) -> None:
         super().__init__()
         self.norm1 = norm_layer(dim)
-        self.attn = Attention(
-            dim,
-            num_heads=num_heads,
-            qkv_bias=qkv_bias,
-            qk_norm=qk_norm,
-            attn_drop=attn_drop,
-            proj_drop=proj_drop,
-            norm_layer=norm_layer,
-        )
+        
+        # TODO
+        self.embed_positions = RoFormerSinusoidalPositionalEmbedding(max_num_patches, dim//num_heads)
+        self.crossattn = RoFormerSelfAttention(dim, num_heads)
+        
         self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path1 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
@@ -242,11 +238,6 @@ class RopeBlock(nn.Module):
         )
         self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-        
-        # TODO
-        self.embed_positions = RoFormerSinusoidalPositionalEmbedding(max_num_patches, dim//num_heads)
-        self.crossattn = RoFormerSelfAttention(dim, num_heads)
-        self.selfattn = RoFormerSelfAttention(dim, num_heads)
         
         
 
